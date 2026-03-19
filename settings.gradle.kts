@@ -1,0 +1,1 @@
+rootProject.name = "shopify-functions-query-cost"

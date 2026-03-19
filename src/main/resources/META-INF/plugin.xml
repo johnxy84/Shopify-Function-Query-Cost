@@ -1,0 +1,34 @@
+<!-- Plugin Configuration File: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <!-- Unique identifier of the plugin. It should be FQN, cannot be changed between the plugin versions. -->
+    <id>com.johnxy84.shopify.functions-query-cost</id>
+
+    <!-- Public plugin name should be written in Title Case.
+         Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-name -->
+    <name>Shopify Functions Query Cost</name>
+
+    <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
+    <vendor url="https://github.com/johnxy84/Shopify-Function-Query-Cost">John Okoroafor</vendor>
+
+    <!-- Description of the plugin displayed on the Plugin Page and IDE Plugin Manager.
+         Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-description -->
+    <description><![CDATA[
+        Displays Shopify Function input GraphQL query cost in the status bar based on Shopify limits, with warnings for
+        high-cost queries and oversized list arguments. The widget activates for files referenced by
+        <code>input_query</code> in <code>shopify.extension.toml</code>.
+    ]]></description>
+
+    <!-- Product and plugin compatibility requirements.
+         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <!-- Extensions defined by the plugin.
+         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType name="ShopifyExtensionToml"
+                  implementationClass="com.johnxy84.shopify.shopifyfunctionsquerycost.ShopifyExtensionTomlFileType"
+                  fileNames="shopify.extension.toml"/>
+        <statusBarWidgetFactory id="ShopifyQueryCostWidget"
+                                implementation="com.johnxy84.shopify.shopifyfunctionsquerycost.ShopifyQueryCostWidgetFactory"/>
+    </extensions>
+</idea-plugin>
