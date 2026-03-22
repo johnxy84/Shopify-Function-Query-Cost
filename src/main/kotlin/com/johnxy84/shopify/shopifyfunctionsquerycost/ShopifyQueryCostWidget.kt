@@ -15,8 +15,7 @@ import com.intellij.openapi.wm.StatusBarWidgetFactory
 import com.intellij.openapi.wm.CustomStatusBarWidget
 import com.intellij.util.messages.MessageBusConnection
 import com.intellij.util.ui.UIUtil
-import com.intellij.util.ui.update.MergingUpdateQueue
-import com.intellij.util.ui.update.Update
+import com.intellij.util.Alarm
 import java.awt.Color
 import javax.swing.JComponent
 import javax.swing.JLabel
@@ -41,7 +40,7 @@ class ShopifyQueryCostWidgetFactory : StatusBarWidgetFactory {
 class ShopifyQueryCostWidget(private val project: Project) : StatusBarWidget, CustomStatusBarWidget, Disposable {
     private var statusBar: StatusBar? = null
     private val label = JLabel("Shopify Query Cost: —")
-    private val updateQueue = MergingUpdateQueue("ShopifyQueryCostWidget", 300, true, null, this, null, false)
+    private val alarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
     private val inputQueryIndex = project.getService(ShopifyInputQueryIndexService::class.java)
     private val connection: MessageBusConnection = project.messageBus.connect(this)
 
@@ -85,9 +84,8 @@ class ShopifyQueryCostWidget(private val project: Project) : StatusBarWidget, Cu
     override fun getPresentation(): StatusBarWidget.WidgetPresentation? = null
 
     private fun scheduleUpdate() {
-        updateQueue.queue(Update.create(ID) {
-            updateNow()
-        })
+        alarm.cancelAllRequests()
+        alarm.addRequest({ updateNow() }, 300)
     }
 
     private fun updateNow() {
