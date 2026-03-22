@@ -10,7 +10,7 @@ class ShopifyQueryAnalyzerTest {
         val query = """
             query Input {
               product {
-                metafield(namespace: "x", key: "y") {
+                vat: metafield(namespace: "x", key: "y") {
                   value
                 }
               }
@@ -19,6 +19,10 @@ class ShopifyQueryAnalyzerTest {
 
         val analysis = ShopifyQueryAnalyzer.analyze(query)
         assertEquals(3, analysis.cost)
+        val node = findNode(analysis.breakdown) { it.label == "vat (x:y)" }
+        assertEquals(3, node?.cost)
+        val valueNode = findNode(node) { it.label == "value" }
+        assertEquals(0, valueNode?.cost)
     }
 
     @Test
@@ -34,6 +38,8 @@ class ShopifyQueryAnalyzerTest {
 
         val analysis = ShopifyQueryAnalyzer.analyze(query)
         assertEquals(1, analysis.cost)
+        val typenameNode = findNode(analysis.breakdown) { it.label == "__typename" }
+        assertEquals(0, typenameNode?.cost)
     }
 
     @Test
@@ -51,6 +57,10 @@ class ShopifyQueryAnalyzerTest {
 
         val analysis = ShopifyQueryAnalyzer.analyze(query)
         assertEquals(1, analysis.cost)
+        val fragmentNode = findNode(analysis.breakdown) { it.label == "Fragment: Fields" }
+        assertTrue(fragmentNode != null)
+        val idNode = findNode(fragmentNode) { it.label == "id" }
+        assertTrue(idNode != null)
     }
 
     @Test
@@ -68,5 +78,20 @@ class ShopifyQueryAnalyzerTest {
 
         val analysis = ShopifyQueryAnalyzer.analyze(query)
         assertTrue(analysis.warnings.any { it.contains("List literal") })
+    }
+
+    private fun findNode(
+        root: QueryBreakdownNode?,
+        predicate: (QueryBreakdownNode) -> Boolean
+    ): QueryBreakdownNode? {
+        if (root == null) return null
+        val queue = ArrayDeque<QueryBreakdownNode>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val node = queue.removeFirst()
+            if (predicate(node)) return node
+            node.children.forEach { queue.add(it) }
+        }
+        return null
     }
 }

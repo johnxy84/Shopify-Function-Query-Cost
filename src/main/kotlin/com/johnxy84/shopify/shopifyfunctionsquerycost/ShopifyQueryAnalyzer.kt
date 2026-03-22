@@ -5,19 +5,28 @@ import graphql.parser.Parser
 
 data class QueryAnalysis(
     val cost: Int?,
+    val breakdown: QueryBreakdownNode?,
     val warnings: List<String>,
     val parseError: String? = null
 )
 
+data class QueryBreakdownNode(
+    val label: String,
+    val cost: Int,
+    val children: List<QueryBreakdownNode> = emptyList()
+)
+
 object ShopifyQueryAnalyzer {
     private val specialCostFields = setOf("metafield", "hasTags", "hasAnyTag", "inAnyCollection", "inCollections")
+    private val attributeFields = setOf("attribute", "attributes")
 
     fun analyze(query: String): QueryAnalysis {
         return try {
             val document = Parser().parseDocument(query)
             val fragments = document.definitions.filterIsInstance<FragmentDefinition>()
                 .associateBy { it.name }
-            val cost = calculateCost(document, fragments)
+            val breakdownResult = buildBreakdown(document, fragments)
+            val cost = breakdownResult.totalCost
             val warnings = mutableListOf<String>()
 
             if (cost > 30) {
@@ -27,42 +36,73 @@ object ShopifyQueryAnalyzer {
                 warnings.add("List literal exceeds 100 elements.")
             }
 
-            QueryAnalysis(cost = cost, warnings = warnings)
+            QueryAnalysis(cost = cost, breakdown = breakdownResult.root, warnings = warnings)
         } catch (e: Exception) {
             QueryAnalysis(
                 cost = null,
+                breakdown = null,
                 warnings = emptyList(),
                 parseError = e.message ?: "Parse error"
             )
         }
     }
 
-    private fun calculateCost(document: Document, fragments: Map<String, FragmentDefinition>): Int {
-        var cost = 0
+    private data class BreakdownResult(
+        val root: QueryBreakdownNode,
+        val totalCost: Int
+    )
+
+    private fun buildBreakdown(document: Document, fragments: Map<String, FragmentDefinition>): BreakdownResult {
+        val children = mutableListOf<QueryBreakdownNode>()
+        var totalCost = 0
+
         document.definitions.forEach { definition ->
             when (definition) {
                 is OperationDefinition -> {
-                    cost += costSelectionSet(definition.selectionSet, fragments, parentIsSpecialObject = false)
+                    val operationLabel = definition.name ?: "operation"
+                    val selectionResult = breakdownSelectionSet(
+                        definition.selectionSet,
+                        fragments,
+                        parentIsSpecialObject = false
+                    )
+                    children.add(
+                        QueryBreakdownNode(
+                            label = operationLabel,
+                            cost = 0,
+                            children = selectionResult.nodes
+                        )
+                    )
+                    totalCost += selectionResult.cost
                 }
                 else -> Unit
             }
         }
-        return cost
+
+        val root = QueryBreakdownNode(label = "Query", cost = 0, children = children)
+        return BreakdownResult(root = root, totalCost = totalCost)
     }
 
-    private fun costSelectionSet(
+    private data class SelectionBreakdown(
+        val nodes: List<QueryBreakdownNode>,
+        val cost: Int
+    )
+
+    private fun breakdownSelectionSet(
         selectionSet: SelectionSet?,
         fragments: Map<String, FragmentDefinition>,
         parentIsSpecialObject: Boolean
-    ): Int {
-        if (selectionSet == null) return 0
-        var cost = 0
+    ): SelectionBreakdown {
+        if (selectionSet == null) return SelectionBreakdown(emptyList(), 0)
+        val nodes = mutableListOf<QueryBreakdownNode>()
+        var totalCost = 0
+
         for (selection in selectionSet.selections) {
             when (selection) {
                 is Field -> {
                     val fieldName = selection.name
                     val isSpecialField = specialCostFields.contains(fieldName)
                     val isTypename = fieldName == "__typename"
+                    val label = buildFieldLabel(selection, fieldName)
 
                     val fieldCost = when {
                         isTypename -> 0
@@ -71,23 +111,139 @@ object ShopifyQueryAnalyzer {
                         parentIsSpecialObject -> 0
                         else -> 0
                     }
-                    cost += fieldCost
 
                     val childParentIsSpecial = isSpecialField
-                    cost += costSelectionSet(selection.selectionSet, fragments, childParentIsSpecial)
+                    val childBreakdown = breakdownSelectionSet(
+                        selection.selectionSet,
+                        fragments,
+                        childParentIsSpecial
+                    )
+
+                    nodes.add(
+                        QueryBreakdownNode(
+                            label = label,
+                            cost = fieldCost,
+                            children = childBreakdown.nodes
+                        )
+                    )
+                    totalCost += fieldCost + childBreakdown.cost
                 }
                 is InlineFragment -> {
-                    cost += costSelectionSet(selection.selectionSet, fragments, parentIsSpecialObject)
+                    val typeLabel = selection.typeCondition?.name?.let { "InlineFragment on $it" } ?: "InlineFragment"
+                    val childBreakdown = breakdownSelectionSet(
+                        selection.selectionSet,
+                        fragments,
+                        parentIsSpecialObject
+                    )
+                    nodes.add(
+                        QueryBreakdownNode(
+                            label = typeLabel,
+                            cost = 0,
+                            children = childBreakdown.nodes
+                        )
+                    )
+                    totalCost += childBreakdown.cost
                 }
                 is FragmentSpread -> {
                     val fragment = fragments[selection.name]
                     if (fragment != null) {
-                        cost += costSelectionSet(fragment.selectionSet, fragments, parentIsSpecialObject)
+                        val childBreakdown = breakdownSelectionSet(
+                            fragment.selectionSet,
+                            fragments,
+                            parentIsSpecialObject
+                        )
+                        nodes.add(
+                            QueryBreakdownNode(
+                                label = "Fragment: ${selection.name}",
+                                cost = 0,
+                                children = childBreakdown.nodes
+                            )
+                        )
+                        totalCost += childBreakdown.cost
+                    } else {
+                        nodes.add(
+                            QueryBreakdownNode(
+                                label = "Fragment: ${selection.name}",
+                                cost = 0,
+                                children = emptyList()
+                            )
+                        )
                     }
                 }
             }
         }
-        return cost
+
+        return SelectionBreakdown(nodes = nodes, cost = totalCost)
+    }
+
+    private fun buildFieldLabel(field: Field, fieldName: String): String {
+        val baseName = field.alias ?: fieldName
+
+        if (fieldName == "metafield") {
+            val namespace = argumentString(field.arguments, "namespace")
+            val key = argumentString(field.arguments, "key")
+            val identifier = argumentObjectPair(field.arguments, "identifier", "namespace", "key")
+            val resolvedNamespace = namespace ?: identifier?.first
+            val resolvedKey = key ?: identifier?.second
+            val labelFromPair = if (resolvedNamespace != null || resolvedKey != null) {
+                when {
+                    resolvedNamespace != null && resolvedKey != null -> "$resolvedNamespace:$resolvedKey"
+                    resolvedNamespace != null -> "namespace=$resolvedNamespace"
+                    else -> "key=$resolvedKey"
+                }
+            } else {
+                null
+            }
+
+            if (labelFromPair != null) {
+                return "$baseName ($labelFromPair)"
+            }
+
+        }
+
+        if (attributeFields.contains(fieldName)) {
+            val key = argumentString(field.arguments, "key")
+            val name = argumentString(field.arguments, "name")
+            val labelValue = key ?: name
+            if (labelValue != null) {
+                return "$baseName ($labelValue)"
+            }
+        }
+
+        return baseName
+    }
+
+    private fun argumentString(arguments: List<Argument>?, name: String): String? {
+        if (arguments == null) return null
+        val arg = arguments.firstOrNull { it.name == name } ?: return null
+        return valueToLabel(arg.value)
+    }
+
+    private fun argumentObjectPair(
+        arguments: List<Argument>?,
+        name: String,
+        firstKey: String,
+        secondKey: String
+    ): Pair<String?, String?>? {
+        if (arguments == null) return null
+        val arg = arguments.firstOrNull { it.name == name } ?: return null
+        val value = arg.value
+        if (value !is ObjectValue) return null
+        val first = value.objectFields.firstOrNull { it.name == firstKey }?.value?.let { valueToLabel(it) }
+        val second = value.objectFields.firstOrNull { it.name == secondKey }?.value?.let { valueToLabel(it) }
+        return first to second
+    }
+
+    private fun valueToLabel(value: Value<*>): String? {
+        return when (value) {
+            is StringValue -> value.value
+            is EnumValue -> value.name
+            is IntValue -> value.value.toString()
+            is FloatValue -> value.value.toString()
+            is BooleanValue -> value.isValue.toString()
+            is VariableReference -> "\$${value.name}"
+            else -> null
+        }
     }
 
     private fun hasOversizedList(document: Document, fragments: Map<String, FragmentDefinition>): Boolean {
