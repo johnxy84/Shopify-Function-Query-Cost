@@ -15,7 +15,8 @@
     <description><![CDATA[
         Displays Shopify Function input GraphQL query cost in the status bar based on Shopify limits, with warnings for
         high-cost queries and oversized list arguments. The widget activates for files referenced by
-        <code>input_query</code> in <code>shopify.extension.toml</code>.
+        <code>input_query</code> in <code>shopify.extension.toml</code>. See
+        <a href="https://shopify.dev/docs/api/functions/latest#input-query-limits">Shopify input query limits</a>.
     ]]></description>
 
     <!-- Product and plugin compatibility requirements.
