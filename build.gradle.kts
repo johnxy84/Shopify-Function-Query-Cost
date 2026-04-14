@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.johnxy84.shopify"
-version = "1.0"
+version = "1.1"
 
 repositories {
     mavenCentral()
@@ -36,7 +36,15 @@ intellijPlatform {
         }
 
         changeNotes = """
-            Initial version
+            <h3>1.1</h3>
+            <ul>
+                <li>Improved startup performance — filesystem scan and parser initialization now run in the background, eliminating the "plugin might be slowing things down" warning</li>
+                <li>Added metaobject cost support — <code>metaobject</code> (1 point) and <code>field(key:)</code> access (3 points) are now calculated per Shopify's updated documentation</li>
+                <li>Compact status bar — icon with cost number replaces verbose text; full details on hover and click</li>
+                <li>Analysis result caching — skips redundant parsing when document content hasn't changed</li>
+                <li>Fixed fragment cycle detection — circular fragment references no longer cause a stack overflow</li>
+                <li>Fixed timer and listener cleanup on disposal</li>
+            </ul>
         """.trimIndent()
     }
     pluginVerification {

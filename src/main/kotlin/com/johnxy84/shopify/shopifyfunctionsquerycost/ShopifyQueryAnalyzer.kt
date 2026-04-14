@@ -18,6 +18,7 @@ data class QueryBreakdownNode(
 
 object ShopifyQueryAnalyzer {
     private val specialCostFields = setOf("metafield", "hasTags", "hasAnyTag", "inAnyCollection", "inCollections")
+    private val metaobjectFieldAccessFields = setOf("field")
     private val attributeFields = setOf("attribute", "attributes")
 
     fun analyze(query: String): QueryAnalysis {
@@ -63,7 +64,8 @@ object ShopifyQueryAnalyzer {
                     val selectionResult = breakdownSelectionSet(
                         definition.selectionSet,
                         fragments,
-                        parentIsSpecialObject = false
+                        parentIsSpecialObject = false,
+                        visitedFragments = mutableSetOf()
                     )
                     children.add(
                         QueryBreakdownNode(
@@ -90,7 +92,9 @@ object ShopifyQueryAnalyzer {
     private fun breakdownSelectionSet(
         selectionSet: SelectionSet?,
         fragments: Map<String, FragmentDefinition>,
-        parentIsSpecialObject: Boolean
+        parentIsSpecialObject: Boolean,
+        visitedFragments: MutableSet<String>,
+        parentIsMetaobject: Boolean = false
     ): SelectionBreakdown {
         if (selectionSet == null) return SelectionBreakdown(emptyList(), 0)
         val nodes = mutableListOf<QueryBreakdownNode>()
@@ -101,22 +105,28 @@ object ShopifyQueryAnalyzer {
                 is Field -> {
                     val fieldName = selection.name
                     val isSpecialField = specialCostFields.contains(fieldName)
+                    val isMetaobject = fieldName == "metaobject"
+                    val isMetaobjectFieldAccess = parentIsMetaobject && metaobjectFieldAccessFields.contains(fieldName)
                     val isTypename = fieldName == "__typename"
                     val label = buildFieldLabel(selection, fieldName)
 
                     val fieldCost = when {
                         isTypename -> 0
                         isSpecialField -> 3
+                        isMetaobjectFieldAccess -> 3
+                        isMetaobject -> 1
                         selection.selectionSet == null -> if (parentIsSpecialObject) 0 else 1
                         parentIsSpecialObject -> 0
                         else -> 0
                     }
 
-                    val childParentIsSpecial = isSpecialField
+                    val childParentIsSpecial = isSpecialField || isMetaobjectFieldAccess
                     val childBreakdown = breakdownSelectionSet(
                         selection.selectionSet,
                         fragments,
-                        childParentIsSpecial
+                        childParentIsSpecial,
+                        visitedFragments,
+                        parentIsMetaobject = isMetaobject
                     )
 
                     nodes.add(
@@ -133,7 +143,9 @@ object ShopifyQueryAnalyzer {
                     val childBreakdown = breakdownSelectionSet(
                         selection.selectionSet,
                         fragments,
-                        parentIsSpecialObject
+                        parentIsSpecialObject,
+                        visitedFragments,
+                        parentIsMetaobject
                     )
                     nodes.add(
                         QueryBreakdownNode(
@@ -146,12 +158,15 @@ object ShopifyQueryAnalyzer {
                 }
                 is FragmentSpread -> {
                     val fragment = fragments[selection.name]
-                    if (fragment != null) {
+                    if (fragment != null && visitedFragments.add(selection.name)) {
                         val childBreakdown = breakdownSelectionSet(
                             fragment.selectionSet,
                             fragments,
-                            parentIsSpecialObject
+                            parentIsSpecialObject,
+                            visitedFragments,
+                            parentIsMetaobject
                         )
+                        visitedFragments.remove(selection.name)
                         nodes.add(
                             QueryBreakdownNode(
                                 label = "Fragment: ${selection.name}",
@@ -199,6 +214,22 @@ object ShopifyQueryAnalyzer {
                 return "$baseName ($labelFromPair)"
             }
 
+        }
+
+        if (fieldName == "metaobject") {
+            val handle = argumentString(field.arguments, "handle")
+            val id = argumentString(field.arguments, "id")
+            val labelValue = handle ?: id
+            if (labelValue != null) {
+                return "$baseName ($labelValue)"
+            }
+        }
+
+        if (metaobjectFieldAccessFields.contains(fieldName)) {
+            val key = argumentString(field.arguments, "key")
+            if (key != null) {
+                return "$baseName ($key)"
+            }
         }
 
         if (attributeFields.contains(fieldName)) {
@@ -257,14 +288,14 @@ object ShopifyQueryAnalyzer {
         document.definitions.forEach { definition ->
             when (definition) {
                 is OperationDefinition -> {
-                    if (selectionSetHasOversizedList(definition.selectionSet, fragments, variableDefaults)) return true
+                    if (selectionSetHasOversizedList(definition.selectionSet, fragments, variableDefaults, mutableSetOf())) return true
                     definition.variableDefinitions?.forEach { def ->
                         val defaultValue = def.defaultValue
                         if (defaultValue != null && valueHasOversizedList(defaultValue, variableDefaults)) return true
                     }
                 }
                 is FragmentDefinition -> {
-                    if (selectionSetHasOversizedList(definition.selectionSet, fragments, variableDefaults)) return true
+                    if (selectionSetHasOversizedList(definition.selectionSet, fragments, variableDefaults, mutableSetOf())) return true
                 }
             }
         }
@@ -274,23 +305,26 @@ object ShopifyQueryAnalyzer {
     private fun selectionSetHasOversizedList(
         selectionSet: SelectionSet?,
         fragments: Map<String, FragmentDefinition>,
-        variableDefaults: Map<String, Value<*>>
+        variableDefaults: Map<String, Value<*>>,
+        visitedFragments: MutableSet<String>
     ): Boolean {
         if (selectionSet == null) return false
         for (selection in selectionSet.selections) {
             when (selection) {
                 is Field -> {
                     if (selection.arguments.any { argumentHasOversizedList(it, variableDefaults) }) return true
-                    if (selectionSetHasOversizedList(selection.selectionSet, fragments, variableDefaults)) return true
+                    if (selectionSetHasOversizedList(selection.selectionSet, fragments, variableDefaults, visitedFragments)) return true
                 }
                 is InlineFragment -> {
-                    if (selectionSetHasOversizedList(selection.selectionSet, fragments, variableDefaults)) return true
+                    if (selectionSetHasOversizedList(selection.selectionSet, fragments, variableDefaults, visitedFragments)) return true
                 }
                 is FragmentSpread -> {
                     val fragment = fragments[selection.name]
-                    if (fragment != null &&
-                        selectionSetHasOversizedList(fragment.selectionSet, fragments, variableDefaults)
-                    ) return true
+                    if (fragment != null && visitedFragments.add(selection.name)) {
+                        val result = selectionSetHasOversizedList(fragment.selectionSet, fragments, variableDefaults, visitedFragments)
+                        visitedFragments.remove(selection.name)
+                        if (result) return true
+                    }
                 }
             }
         }

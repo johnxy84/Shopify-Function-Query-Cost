@@ -8,6 +8,8 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.ui.popup.JBPopup
@@ -17,14 +19,15 @@ import com.intellij.openapi.wm.StatusBarWidgetFactory
 import com.intellij.openapi.wm.CustomStatusBarWidget
 import com.intellij.ide.DataManager
 import com.intellij.util.messages.MessageBusConnection
-import com.intellij.util.ui.UIUtil
 import com.intellij.util.ui.JBUI
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.treeStructure.SimpleTree
 import com.intellij.util.ui.tree.TreeUtil
+import com.intellij.openapi.util.IconLoader
 import java.awt.Color
 import java.awt.BorderLayout
+import java.awt.FlowLayout
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.JComponent
@@ -37,10 +40,10 @@ import com.intellij.ui.JBColor
 import com.intellij.ui.awt.RelativePoint
 import java.awt.Point
 
-class ShopifyQueryCostWidgetFactory : StatusBarWidgetFactory {
+class ShopifyQueryCostWidgetFactory : StatusBarWidgetFactory, DumbAware {
     override fun getId(): String = ShopifyQueryCostWidget.ID
 
-    override fun getDisplayName(): String = "Shopify Query Cost"
+    override fun getDisplayName(): String = "Query Cost"
 
     override fun isAvailable(project: Project): Boolean = true
 
@@ -55,12 +58,22 @@ class ShopifyQueryCostWidgetFactory : StatusBarWidgetFactory {
 
 class ShopifyQueryCostWidget(private val project: Project) : StatusBarWidget, CustomStatusBarWidget, Disposable {
     private var statusBar: StatusBar? = null
-    private val label = JLabel("Shopify Query Cost: —")
+    private val icon = IconLoader.getIcon("/icons/statusBarIcon.svg", ShopifyQueryCostWidget::class.java)
+    private val iconLabel = JLabel(icon)
+    private val textLabel = JLabel("—")
+    private val panel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
+        isOpaque = false
+        add(iconLabel)
+        add(textLabel)
+    }
     private val debounceTimer = Timer(300) { updateNow() }.apply { isRepeats = false }
-    private val inputQueryIndex = project.getService(ShopifyInputQueryIndexService::class.java)
+    private val inputQueryIndex by lazy { project.getService(ShopifyInputQueryIndexService::class.java) }
+    private var cachedFilePath: String? = null
+    private var cachedStamp: Long = -1
+    private var cachedAnalysis: QueryAnalysis? = null
     private val connection: MessageBusConnection = project.messageBus.connect(this)
     init {
-        label.addMouseListener(object : MouseAdapter() {
+        panel.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 if (e.button == MouseEvent.BUTTON1) {
                     showBreakdownPopup(e)
@@ -82,9 +95,11 @@ class ShopifyQueryCostWidget(private val project: Project) : StatusBarWidget, Cu
 
         EditorFactory.getInstance().eventMulticaster.addDocumentListener(object : DocumentListener {
             override fun documentChanged(event: DocumentEvent) {
-                val file = FileDocumentManager.getInstance().getFile(event.document)
+                val file = FileDocumentManager.getInstance().getFile(event.document) ?: return
+                val extension = file.extension
+                if (extension != "graphql" && extension != "gql") return
                 val selectedFile = FileEditorManager.getInstance(project).selectedFiles.firstOrNull()
-                if (file != null && file == selectedFile) {
+                if (file == selectedFile) {
                     scheduleUpdate()
                 }
             }
@@ -95,14 +110,18 @@ class ShopifyQueryCostWidget(private val project: Project) : StatusBarWidget, Cu
 
     override fun install(statusBar: StatusBar) {
         this.statusBar = statusBar
+        ApplicationManager.getApplication().executeOnPooledThread {
+            ShopifyQueryAnalyzer.analyze("{ __typename }")
+        }
         scheduleUpdate()
     }
 
     override fun dispose() {
+        debounceTimer.stop()
         statusBar = null
     }
 
-    override fun getComponent(): JComponent = label
+    override fun getComponent(): JComponent = panel
 
     override fun getPresentation(): StatusBarWidget.WidgetPresentation? = null
 
@@ -119,45 +138,52 @@ class ShopifyQueryCostWidget(private val project: Project) : StatusBarWidget, Cu
         val analysis = computeAnalysis()
 
         if (analysis == null) {
-            label.text = "No Shopify input query active"
-            label.toolTipText = null
-            label.foreground = JBColor.foreground()
+            textLabel.text = "—"
+            panel.toolTipText = "No Shopify input query active"
+            textLabel.foreground = JBColor.foreground()
             notifyStatusBar()
             return
         }
 
         if (analysis.cost == null) {
-            label.text = "Shopify Query Cost: — (Parse error)"
-            label.toolTipText = analysis.parseError?.let { "<html>$it</html>" }
-            label.foreground = JBColor(Color(0xD32F2F), Color(0xFF6B6B))
+            textLabel.text = "—"
+            panel.toolTipText = analysis.parseError?.let { "<html>Parse error: $it</html>" } ?: "Parse error"
+            textLabel.foreground = JBColor(Color(0xD32F2F), Color(0xFF6B6B))
             notifyStatusBar()
             return
         }
 
-        label.text = "Shopify Query Cost: ${analysis.cost}/30"
+        textLabel.text = "${analysis.cost}/30"
         val rangeWarning = if (analysis.cost in 25..30) {
-            "Cost is in warning range (25–30)."
+            "Cost is in warning range (25\u201330)."
         } else {
             null
         }
         val allWarnings = analysis.warnings + listOfNotNull(rangeWarning)
-        label.toolTipText = if (allWarnings.isEmpty()) {
-            "Shopify input query within limits."
+        panel.toolTipText = if (allWarnings.isEmpty()) {
+            "Query cost: ${analysis.cost}/30"
         } else {
-            "<html>Warnings:<br>${allWarnings.joinToString("<br>")}</html>"
+            "<html>Query cost: ${analysis.cost}/30<br>${allWarnings.joinToString("<br>")}</html>"
         }
-        label.foreground = statusColor(analysis, rangeWarning != null)
+        textLabel.foreground = statusColor(analysis, rangeWarning != null)
         notifyStatusBar()
     }
 
     private fun computeAnalysis(): QueryAnalysis? {
         val editor = FileEditorManager.getInstance(project).selectedTextEditor
         val file = editor?.document?.let { FileDocumentManager.getInstance().getFile(it) }
-        if (editor == null || file == null || !inputQueryIndex.isInputQueryFile(file)) {
-            return null
-        }
+        if (editor == null || file == null) return null
+        if (!inputQueryIndex.isReady() || !inputQueryIndex.isInputQueryFile(file)) return null
 
-        return ShopifyQueryAnalyzer.analyze(editor.document.text)
+        val filePath = file.path
+        val stamp = editor.document.modificationStamp
+        if (filePath == cachedFilePath && stamp == cachedStamp) return cachedAnalysis
+
+        val result = ShopifyQueryAnalyzer.analyze(editor.document.text)
+        cachedFilePath = filePath
+        cachedStamp = stamp
+        cachedAnalysis = result
+        return result
     }
 
     private fun showBreakdownPopup(e: MouseEvent?) {
@@ -197,19 +223,19 @@ class ShopifyQueryCostWidget(private val project: Project) : StatusBarWidget, Cu
                 .createPopup()
         }
 
-        if (label.isShowing) {
-            val screenPoint = label.locationOnScreen
+        if (panel.isShowing) {
+            val screenPoint = panel.locationOnScreen
             val popupSize = popup.content.preferredSize
             var x = screenPoint.x
             var y = screenPoint.y - popupSize.height
             if (y < 0) {
-                y = screenPoint.y + label.height
+                y = screenPoint.y + panel.height
             }
-            popup.showInScreenCoordinates(label, Point(x, y))
+            popup.showInScreenCoordinates(panel, Point(x, y))
         } else if (e != null) {
             popup.show(RelativePoint(e))
         } else {
-            val dataContext = DataManager.getInstance().getDataContext(label)
+            val dataContext = DataManager.getInstance().getDataContext(panel)
             popup.showInBestPositionFor(dataContext)
         }
     }
@@ -257,7 +283,7 @@ class ShopifyQueryCostWidget(private val project: Project) : StatusBarWidget, Cu
     }
 
     private fun notifyStatusBar() {
-        UIUtil.invokeLaterIfNeeded {
+        ApplicationManager.getApplication().invokeLater {
             statusBar?.updateWidget(ID)
         }
     }

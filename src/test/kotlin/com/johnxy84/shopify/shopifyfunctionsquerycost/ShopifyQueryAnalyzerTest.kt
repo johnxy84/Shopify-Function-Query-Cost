@@ -80,6 +80,62 @@ class ShopifyQueryAnalyzerTest {
         assertTrue(analysis.warnings.any { it.contains("List literal") })
     }
 
+    @Test
+    fun `metaobject root access costs 1`() {
+        val query = """
+            query Input {
+              metaobject(handle: "my-obj") {
+                id
+              }
+            }
+        """.trimIndent()
+
+        val analysis = ShopifyQueryAnalyzer.analyze(query)
+        assertEquals(2, analysis.cost) // 1 for metaobject + 1 for id
+        val node = findNode(analysis.breakdown) { it.label == "metaobject (my-obj)" }
+        assertEquals(1, node?.cost)
+    }
+
+    @Test
+    fun `metaobject field access costs 3 with free children`() {
+        val query = """
+            query Input {
+              metaobject(handle: "my-obj") {
+                field(key: "color") {
+                  value
+                }
+              }
+            }
+        """.trimIndent()
+
+        val analysis = ShopifyQueryAnalyzer.analyze(query)
+        assertEquals(4, analysis.cost) // 1 for metaobject + 3 for field(key:)
+        val fieldNode = findNode(analysis.breakdown) { it.label == "field (color)" }
+        assertEquals(3, fieldNode?.cost)
+        val valueNode = findNode(fieldNode) { it.label == "value" }
+        assertEquals(0, valueNode?.cost)
+    }
+
+    @Test
+    fun `circular fragment references do not stack overflow`() {
+        val query = """
+            query Input {
+              cart {
+                ...A
+              }
+            }
+            fragment A on Cart {
+              ...B
+            }
+            fragment B on Cart {
+              ...A
+            }
+        """.trimIndent()
+
+        val analysis = ShopifyQueryAnalyzer.analyze(query)
+        assertTrue(analysis.cost != null)
+    }
+
     private fun findNode(
         root: QueryBreakdownNode?,
         predicate: (QueryBreakdownNode) -> Boolean

@@ -11,6 +11,8 @@ import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.util.messages.Topic
 import com.intellij.util.PathUtil
 import com.intellij.openapi.vfs.VfsUtilCore
+import com.intellij.openapi.application.ApplicationManager
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 interface ShopifyInputQueryIndexListener {
@@ -23,25 +25,33 @@ val SHOPIFY_INPUT_QUERY_INDEX_TOPIC: Topic<ShopifyInputQueryIndexListener> =
 @Service(Service.Level.PROJECT)
 class ShopifyInputQueryIndexService(private val project: Project) : Disposable {
     private val inputQueryPaths = AtomicReference<Set<String>>(emptySet())
+    private val scanningInProgress = AtomicBoolean(true)
 
     init {
-        rescan()
+        ApplicationManager.getApplication().executeOnPooledThread {
+            ApplicationManager.getApplication().runReadAction { rescan() }
+            scanningInProgress.set(false)
+        }
         val connection = project.messageBus.connect(this)
         connection.subscribe(VirtualFileManager.VFS_CHANGES, object : BulkFileListener {
             override fun after(events: List<VFileEvent>) {
                 if (events.any { it.path.endsWith("shopify.extension.toml") }) {
-                    rescan()
+                    ApplicationManager.getApplication().executeOnPooledThread {
+                        ApplicationManager.getApplication().runReadAction { rescan() }
+                    }
                 }
             }
         })
     }
+
+    fun isReady(): Boolean = !scanningInProgress.get()
 
     fun isInputQueryFile(file: VirtualFile): Boolean {
         val path = PathUtil.toSystemIndependentName(file.path)
         return inputQueryPaths.get().contains(path)
     }
 
-    fun rescan() {
+    private fun rescan() {
         val basePath = project.basePath ?: return
         val baseDir = LocalFileSystem.getInstance().findFileByPath(basePath) ?: return
         val found = mutableSetOf<String>()
@@ -67,7 +77,9 @@ class ShopifyInputQueryIndexService(private val project: Project) : Disposable {
         val normalized = found.toSet()
         val previous = inputQueryPaths.getAndSet(normalized)
         if (previous != normalized) {
-            project.messageBus.syncPublisher(SHOPIFY_INPUT_QUERY_INDEX_TOPIC).inputQueryIndexChanged()
+            ApplicationManager.getApplication().invokeLater {
+                project.messageBus.syncPublisher(SHOPIFY_INPUT_QUERY_INDEX_TOPIC).inputQueryIndexChanged()
+            }
         }
     }
 
