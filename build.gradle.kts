@@ -1,7 +1,7 @@
 plugins {
     id("java")
-    id("org.jetbrains.kotlin.jvm") version "2.1.20"
-    id("org.jetbrains.intellij.platform") version "2.10.2"
+    id("org.jetbrains.kotlin.jvm") version "2.4.21"
+    id("org.jetbrains.intellij.platform") version "2.20.0"
 }
 
 group = "com.johnxy84.shopify"
@@ -17,7 +17,7 @@ repositories {
 // Read more: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin.html
 dependencies {
     intellijPlatform {
-        rustRover("2025.3.5")
+        rustRover("2026.2.5")
         testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
 
         // Add plugin dependencies for compilation here, example:
@@ -32,7 +32,8 @@ dependencies {
 intellijPlatform {
     pluginConfiguration {
         ideaVersion {
-            sinceBuild = "242"
+            // Supports the current and previous major IDE releases; until-build stays unset.
+            sinceBuild = "262"
         }
 
         changeNotes = """
@@ -49,19 +50,13 @@ intellijPlatform {
     }
     pluginVerification {
         ides {
-            create("IU", "2024.2.6") {
-                // No extra configuration
-            }
+            create("RR", "2026.2.5")
+            create("RR", "2026.3")
         }
     }
 }
 
 tasks {
-    // Set the JVM compatibility versions
-    withType<JavaCompile> {
-        sourceCompatibility = "21"
-        targetCompatibility = "21"
-    }
     withType<Test> {
         useJUnitPlatform()
     }
@@ -69,6 +64,8 @@ tasks {
 
 kotlin {
     compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+        // Must match the Kotlin stdlib bundled in the sinceBuild IDE, which is what runs the plugin there.
+        apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_4)
+        languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_4)
     }
 }
